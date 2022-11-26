@@ -58,7 +58,8 @@ std::vector<ULL> qps_records;
 std::atomic<int> send_msg;
 
 brpc::Channel channel;
-braft::PeerId leader;
+// braft::PeerId leader;
+braft::PeerId leader("127.0.1.1:8200");
 
 auto now()->decltype(std::chrono::high_resolution_clock::now()){
 	return std::chrono::high_resolution_clock::now();
@@ -86,26 +87,15 @@ void writer(){
             request.set_size(FLAGS_request_size);
             stub.read(&cntl, &request, &response, NULL);
         }
-        if (cntl.Failed()) {
-            LOG(WARNING) << "Fail to send request to " << leader
-                         << " : " << cntl.ErrorText();
-            // Clear leadership since this RPC failed.
-            braft::rtb::update_leader(FLAGS_group, braft::PeerId());
-            bthread_usleep(FLAGS_timeout_ms * 1000L);
-            continue;
-        }
 
-        if (!response.success()) {
-            LOG(WARNING) << "Fail to send request to " << leader
-                         << ", redirecting to "
-                         << (response.has_redirect() 
-                                ? response.redirect() : "nowhere");
-            // Update route table since we have redirect information
-            braft::rtb::update_leader(FLAGS_group, response.redirect());
+        if (cntl.Failed()) {
             continue;
-        }else{
-            send_msg.fetch_add(1,std::memory_order_relaxed);    //响应成功，计数增加
         }
+        if (response.success()){
+            send_msg.fetch_add(1,std::memory_order_relaxed);    //响应成功，计数增加
+        }else{
+            continue;
+        }       
 
         g_latency_recorder << cntl.latency_us();
         if (FLAGS_log_each_request) {
@@ -183,7 +173,7 @@ void running_channel(){
 
     LOG(INFO) << "Block client is going to quit";
     for (int i = 0; i < FLAGS_thread_num; ++i) {        
-        tids[i].join();        
+        tids[i].join();
     }
 
     auto avg_iops = double(std::accumulate(iops_records.begin(),iops_records.end(),0.0))/double(iops_records.size())/double(FLAGS_tm);
@@ -202,36 +192,11 @@ int main(int argc, char* argv[]) {
     LOG(INFO) << "request send thread nums " << FLAGS_thread_num
             << " request size " << FLAGS_request_size;
 
-    // Register configuration of target group to RouteTable
-    if (braft::rtb::update_configuration(FLAGS_group, FLAGS_conf) != 0) {
-        LOG(ERROR) << "Fail to register configuration " << FLAGS_conf
-                   << " of group " << FLAGS_group;
-        return -1;
-    }   
-
- 
-    // Select leader of the target group from RouteTable
-    if (braft::rtb::select_leader(FLAGS_group, &leader) != 0) {
-        // Leader is unknown in RouteTable. Ask RouteTable to refresh leader
-        // by sending RPCs.
-        butil::Status st = braft::rtb::refresh_leader(
-                    FLAGS_group, FLAGS_timeout_ms);
-        if (!st.ok()) {
-            // Not sure about the leader, sleep for a while and the ask again.
-            LOG(WARNING) << "Fail to refresh_leader : " << st;
-            bthread_usleep(FLAGS_timeout_ms * 1000L);
-        }
-    }
-    if (channel.Init("127.0.1.1:8200", NULL) != 0) {
+    if (channel.Init(leader.addr, NULL) != 0) {
         LOG(ERROR) << "Fail to init channel to " << leader;
         bthread_usleep(FLAGS_timeout_ms * 1000L);
     }
     
     running_channel();
-
-
-
-
-
     return 0;
 }
